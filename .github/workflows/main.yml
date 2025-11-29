@@ -1,0 +1,36 @@
+name: Win-11-128-Cores
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360   # 6 JAM
+
+    steps:
+      - name: Download Ngrok
+        run: |
+          Invoke-WebRequest -Uri https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
+          Expand-Archive ngrok.zip -DestinationPath .
+
+      - name: Set Ngrok Auth Token
+        run: |
+          .\ngrok.exe authtoken "${{ secrets.NGROK_TOKEN }}"
+
+      - name: Setup RDP
+        run: |
+          net user admin123 Password123! /add
+          net localgroup administrators admin123 /add
+          reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+
+      - name: Start Ngrok Tunnel (RDP)
+        run: |
+          Start-Process powershell -ArgumentList "-NoProfile -WindowStyle Hidden -Command .\ngrok.exe tcp 3389"
+
+      - name: Show Connection Info
+        run: |
+          Start-Sleep -Seconds 10
+          Invoke-WebRequest http://127.0.0.1:4040/api/tunnels | Out-File tunnel.txt
+          type tunnel.txt
