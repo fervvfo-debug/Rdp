@@ -46,8 +46,8 @@ jobs:
     - name: Create admin user (rdpuser)
       run: |
         # only create if not exists
-        $u = 'rdpuser'
-        $pw = 'Rdp12345!'
+        $u = 'gene'
+        $pw = 'rdp123'
         if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
           net user $u $pw /add
           net localgroup administrators $u /add
@@ -99,8 +99,8 @@ jobs:
         Write-Host "Use the ngrok public_url value printed above."
         Write-Host "When connecting from Android Microsoft RDP:"
         Write-Host "  - PC name / Host: 0.tcp.ngrok.io:XXXXX  (use exactly as shown; remove 'tcp://')"
-        Write-Host "  - Username: rdpuser"
-        Write-Host "  - Password: Rdp12345!"
+        Write-Host "  - Username: gene"
+        Write-Host "  - Password: Rdp123"
         Write-Host "DO NOT commit your NGROK_AUTHTOKEN to public repos."
         Write-Host "=========================================="
         # keep runner alive so ngrok and RDP stay running while you connect
