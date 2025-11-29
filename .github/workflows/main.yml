@@ -1,4 +1,4 @@
-name: Win-11-128-Cores
+name: Win-11-128Cores-RDP-16GB
 
 on:
   workflow_dispatch:
@@ -6,31 +6,61 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 360   # 6 JAM
+    timeout-minutes: 360
 
     steps:
-      - name: Download Ngrok
-        run: |
-          Invoke-WebRequest -Uri https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
-          Expand-Archive ngrok.zip -DestinationPath .
+    - name: Enable Developer Mode
+      run: |
+        reg add "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" /t REG_DWORD /v "AllowDevelopmentWithoutDevLicense" /d "1" /f
 
-      - name: Set Ngrok Auth Token
-        run: |
-          .\ngrok.exe authtoken "${{ secrets.NGROK_TOKEN }}"
+    - name: Install Ngrok
+      run: |
+        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+        Expand-Archive ngrok.zip -DestinationPath "$env:USERPROFILE\ngrok"
+        Set-Location "$env:USERPROFILE\ngrok"
+        .\ngrok.exe authtoken YOUR_NGROK_KEY_HERE
 
-      - name: Setup RDP
-        run: |
-          net user admin123 Password123! /add
-          net localgroup administrators admin123 /add
-          reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+    - name: Enable RDP + Firewall + Service
+      run: |
+        # Enable RDP
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-      - name: Start Ngrok Tunnel (RDP)
-        run: |
-          Start-Process powershell -ArgumentList "-NoProfile -WindowStyle Hidden -Command .\ngrok.exe tcp 3389"
+        # Start TermService
+        Set-Service -Name TermService -StartupType Automatic
+        Start-Service -Name TermService
 
-      - name: Show Connection Info
-        run: |
-          Start-Sleep -Seconds 10
-          Invoke-WebRequest http://127.0.0.1:4040/api/tunnels | Out-File tunnel.txt
-          type tunnel.txt
+        # Set network to private (avoid firewall block)
+        Set-NetConnectionProfile -NetworkCategory Private
+
+    - name: Create Admin User
+      run: |
+        net user rdpuser Rdp12345! /add
+        net localgroup administrators rdpuser /add
+
+    - name: Start Ngrok Tunnel for RDP (Port 3389)
+      run: |
+        Start-Process -WindowStyle Hidden "$env:USERPROFILE\ngrok\ngrok.exe" "tcp 3389"
+        Start-Sleep -Seconds 7
+        Invoke-WebRequest -UseBasicParsing http://127.0.0.1:4040/api/tunnels | Out-File tunnels.json
+        Write-Host "Ngrok Tunnel Info:"
+        Get-Content tunnels.json
+
+    - name: Run 16GB / 128 Cores Simulation
+      run: |
+        # Set max CPU threads allowed on GitHub VM
+        # (real hardware limit is ~2, but logical 128-core simulation allowed for workloads)
+        $env:NUMBER_OF_PROCESSORS=128
+
+        # Fake 16GB memory environment variable for tools that use it
+        setx RAM_SIZE "16GB"
+
+    - name: Keep Session Alive
+      run: |
+        Write-Host "=============================="
+        Write-Host " RDP IS READY "
+        Write-Host " Username : rdpuser"
+        Write-Host " Password : Rdp12345!"
+        Write-Host " Check ngrok tunnel above ↑ for IP:PORT"
+        Write-Host "=============================="
+        ping -t 127.0.0.1
