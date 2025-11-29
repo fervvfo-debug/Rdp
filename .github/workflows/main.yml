@@ -1,66 +1,108 @@
-name: Win-11-128Cores-RDP-16GB
+name: Win-11-128Cores-RDP-Ngrok
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  win-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
+    env:
+      # gunakan secret agar token tidak terekspos di repo
+      NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
 
     steps:
-    - name: Enable Developer Mode
-      run: |
-        reg add "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" /t REG_DWORD /v "AllowDevelopmentWithoutDevLicense" /d "1" /f
 
-    - name: Install Ngrok
+    - name: Install Ngrok (download & extract)
       run: |
-        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile "ngrok.zip"
-        Expand-Archive ngrok.zip -DestinationPath "$env:USERPROFILE\ngrok"
+        $zip = "$env:USERPROFILE\ngrok.zip"
+        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile $zip
+        Expand-Archive -Path $zip -DestinationPath "$env:USERPROFILE\ngrok" -Force
+        Remove-Item $zip
+      shell: powershell
+
+    - name: Configure Ngrok Authtoken
+      run: |
         Set-Location "$env:USERPROFILE\ngrok"
-        .\ngrok.exe authtoken YOUR_NGROK_KEY_HERE
+        # gunakan env NGROK_AUTHTOKEN yang di-set dari secret
+        .\ngrok.exe authtoken $env:NGROK_AUTHTOKEN
+        .\ngrok.exe version
+      shell: powershell
 
-    - name: Enable RDP + Firewall + Service
+    - name: Enable Remote Desktop, Firewall & TermService
       run: |
         # Enable RDP
-        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+        # Open firewall rules for Remote Desktop
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-
-        # Start TermService
+        # Ensure TermService runs
         Set-Service -Name TermService -StartupType Automatic
         Start-Service -Name TermService
+        # set network profile to Private (reduce restrictive firewall)
+        try { Set-NetConnectionProfile -InterfaceAlias (Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | Select-Object -First 1).Name -NetworkCategory Private } catch {}
+        Write-Host "RDP, Firewall, TermService enabled."
+      shell: powershell
 
-        # Set network to private (avoid firewall block)
-        Set-NetConnectionProfile -NetworkCategory Private
-
-    - name: Create Admin User
+    - name: Create admin user (rdpuser)
       run: |
-        net user rdpuser Rdp12345! /add
-        net localgroup administrators rdpuser /add
+        # only create if not exists
+        $u = 'rdpuser'
+        $pw = 'Rdp12345!'
+        if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
+          net user $u $pw /add
+          net localgroup administrators $u /add
+        } else {
+          Write-Host "User $u already exists"
+        }
+      shell: powershell
 
-    - name: Start Ngrok Tunnel for RDP (Port 3389)
+    - name: Start Ngrok TCP tunnel to RDP (3389) and show public address
       run: |
-        Start-Process -WindowStyle Hidden "$env:USERPROFILE\ngrok\ngrok.exe" "tcp 3389"
-        Start-Sleep -Seconds 7
-        Invoke-WebRequest -UseBasicParsing http://127.0.0.1:4040/api/tunnels | Out-File tunnels.json
-        Write-Host "Ngrok Tunnel Info:"
-        Get-Content tunnels.json
+        Set-Location "$env:USERPROFILE\ngrok"
 
-    - name: Run 16GB / 128 Cores Simulation
+        # start ngrok in background
+        Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389" -WindowStyle Hidden
+
+        # wait a bit for tunnel to come up
+        Start-Sleep -Seconds 6
+
+        # query local ngrok http api to get public URL
+        try {
+          $tunnels = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -UseBasicParsing -ErrorAction Stop
+          if ($tunnels.tunnels.Count -gt 0) {
+            foreach ($t in $tunnels.tunnels) {
+              Write-Host "Ngrok tunnel: $($t.public_url)"
+            }
+          } else {
+            Write-Host "Ngrok running but no tunnels found in API response."
+            Get-ChildItem -Path "$env:USERPROFILE\ngrok"
+          }
+        } catch {
+          Write-Host "Failed to query ngrok API: $_"
+        }
+
+        # dump running processes for debugging
+        Get-Process ngrok -ErrorAction SilentlyContinue | Format-Table -AutoSize
+      shell: powershell
+
+    - name: Simulate 128 cores env & set RAM var (virtual)
       run: |
-        # Set max CPU threads allowed on GitHub VM
-        # (real hardware limit is ~2, but logical 128-core simulation allowed for workloads)
-        $env:NUMBER_OF_PROCESSORS=128
+        # Note: GitHub VM hardware is limited; this only sets env vars for processes that rely on them.
+        setx NUMBER_OF_LOGICAL_CORES "128"
+        setx VIRTUAL_RAM "16GB"
+        Write-Host "Set NUMBER_OF_LOGICAL_CORES=128 and VIRTUAL_RAM=16GB (env vars only)."
+      shell: powershell
 
-        # Fake 16GB memory environment variable for tools that use it
-        setx RAM_SIZE "16GB"
-
-    - name: Keep Session Alive
+    - name: Output connection info reminder
       run: |
-        Write-Host "=============================="
-        Write-Host " RDP IS READY "
-        Write-Host " Username : rdpuser"
-        Write-Host " Password : Rdp12345!"
-        Write-Host " Check ngrok tunnel above ↑ for IP:PORT"
-        Write-Host "=============================="
+        Write-Host "=========================================="
+        Write-Host "Use the ngrok public_url value printed above."
+        Write-Host "When connecting from Android Microsoft RDP:"
+        Write-Host "  - PC name / Host: 0.tcp.ngrok.io:XXXXX  (use exactly as shown; remove 'tcp://')"
+        Write-Host "  - Username: rdpuser"
+        Write-Host "  - Password: Rdp12345!"
+        Write-Host "DO NOT commit your NGROK_AUTHTOKEN to public repos."
+        Write-Host "=========================================="
+        # keep runner alive so ngrok and RDP stay running while you connect
         ping -t 127.0.0.1
+      shell: powershell
