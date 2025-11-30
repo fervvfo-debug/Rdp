@@ -6,7 +6,7 @@ on:
 jobs:
   win-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 460
     env:
       # gunakan secret agar token tidak terekspos di repo
       NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
