@@ -1,40 +1,154 @@
-name: Win-11-128Cores-RDP-Ngrok
+name: Win-11-128Cores-32GB-512SSD-RDP-Ngrok
 
 on:
   workflow_dispatch:
 
 jobs:
   win-rdp:
-    runs-on: windows-latest
-    timeout-minutes: 460
+    runs-on: windows-latest     # sesuai permintaanmu
+    timeout-minutes: 360
     env:
-      # gunakan secret agar token tidak terekspos di repo
-      NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+      NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}   # set di repo Secrets
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}         # optional, set secure password
+      SIMULATED_RAM: "32GB"
+      SIMULATED_SSD: "512GB"
+      SIMULATED_CORES: "128"
 
     steps:
-
-    - name: Install Ngrok (download & extract)
-      run: |
-        $zip = "$env:USERPROFILE\ngrok.zip"
-        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile $zip
-        Expand-Archive -Path $zip -DestinationPath "$env:USERPROFILE\ngrok" -Force
-        Remove-Item $zip
+    - name: Print runner info (sanity)
       shell: powershell
-
-    - name: Configure Ngrok Authtoken
       run: |
-        Set-Location "$env:USERPROFILE\ngrok"
-        # gunakan env NGROK_AUTHTOKEN yang di-set dari secret
-        .\ngrok.exe authtoken $env:NGROK_AUTHTOKEN
-        .\ngrok.exe version
+        Write-Host "=== RUNNER SANITY CHECK ==="
+        try {
+          $ramBytes = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+          $ramGB = [math]::Round($ramBytes/1GB,2)
+          Write-Host "Host physical RAM (GB): $ramGB"
+        } catch { Write-Host "Couldn't read physical RAM info on hosted runner." }
+        try {
+          $cores = (Get-WmiObject -Class Win32_Processor | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
+          Write-Host "Host logical cores: $cores"
+        } catch { Write-Host "Couldn't read core info." }
+        try {
+          $c = Get-PSDrive -Name C -ErrorAction Stop
+          $sizeGB = [math]::Round(($c.Used + $c.Free)/1GB,2)
+          Write-Host "Host C: size (GB): $sizeGB"
+        } catch { Write-Host "Couldn't read disk info." }
+        Write-Host "=== END SANITY ==="
+
+    - name: Download & Install ngrok
       shell: powershell
+      run: |
+        $installPath = "$env:USERPROFILE\ngrok"
+        New-Item -ItemType Directory -Path $installPath -Force | Out-Null
+        $zip = "$installPath\ngrok.zip"
+        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile $zip -UseBasicParsing
+        Expand-Archive -Path $zip -DestinationPath $installPath -Force
+        Remove-Item $zip -Force
+        Write-Host "ngrok installed to $installPath"
+
+    - name: Configure ngrok authtoken
+      shell: powershell
+      run: |
+        $ngrokExe = "$env:USERPROFILE\ngrok\ngrok.exe"
+        if (-not (Test-Path $ngrokExe)) { throw "ngrok binary not found at $ngrokExe" }
+        if (-not $env:NGROK_AUTHTOKEN -or $env:NGROK_AUTHTOKEN -eq "") {
+          Write-Warning "NGROK_AUTHTOKEN not set (repo secret). ngrok will run in limited mode."
+        } else {
+          & $ngrokExe authtoken $env:NGROK_AUTHTOKEN
+          & $ngrokExe version
+        }
 
     - name: Enable Remote Desktop, Firewall & TermService
+      shell: powershell
       run: |
-        # Enable RDP
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
-        # Open firewall rules for Remote Desktop
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Write-Host "Enabling RDP and firewall rules..."
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+        Set-Service -Name TermService -StartupType Automatic
+        Start-Service -Name TermService -ErrorAction SilentlyContinue
+        # try to set network profile to Private to avoid strict firewall
+        try { $adapter = Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | Select-Object -First 1; if ($adapter) { Set-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -NetworkCategory Private } } catch {}
+
+    - name: Create RDP user (rdpuser) with secure password
+      shell: powershell
+      run: |
+        $username = "rdpuser"
+        if (-not $env:RDP_PASSWORD -or $env:RDP_PASSWORD -eq "") {
+          Write-Warning "RDP_PASSWORD secret not set. Using fallback insecure password - change ASAP!"
+          $pw = "Rdp!ChangeMe123"
+        } else {
+          $pw = $env:RDP_PASSWORD
+        }
+        if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+          net user $username $pw /add
+          net localgroup administrators $username /add
+          Write-Host "Created $username"
+        } else {
+          Write-Host "User exists. Updating password."
+          net user $username $pw
+        }
+
+    - name: Start ngrok TCP tunnel to RDP (with simple auto-restart monitor)
+      shell: powershell
+      run: |
+        $ngrokExe = "$env:USERPROFILE\ngrok\ngrok.exe"
+        if (-not (Test-Path $ngrokExe)) { throw "ngrok not found: $ngrokExe" }
+        # small function: start ngrok and wait for public_url, restart once if fails
+        function Start-NgrokAndShow {
+          param($attempts=2)
+          for ($a=1; $a -le $attempts; $a++) {
+            Write-Host "Starting ngrok (attempt $a)..."
+            # Stop any existing ngrok
+            Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Process -FilePath $ngrokExe -ArgumentList "tcp 3389" -WindowStyle Hidden
+            Start-Sleep -Seconds 6
+            try {
+              $api = "http://127.0.0.1:4040/api/tunnels"
+              $tunnels = Invoke-RestMethod -Uri $api -UseBasicParsing -ErrorAction Stop
+              if ($tunnels -and $tunnels.tunnels.Count -gt 0) {
+                foreach ($t in $tunnels.tunnels) {
+                  Write-Host "Ngrok public_url: $($t.public_url)  -> local: $($t.config.addr)"
+                }
+                return $true
+              } else {
+                Write-Warning "ngrok running but no tunnels found yet"
+              }
+            } catch {
+              Write-Warning "ngrok API not ready: $_"
+            }
+            Start-Sleep -Seconds 3
+          }
+          return $false
+        }
+
+        $ok = Start-NgrokAndShow -attempts 3
+        if (-not $ok) {
+          Write-Warning "ngrok failed to provide tunnels. Check runner connectivity or authtoken."
+          Get-Process -Name ngrok -ErrorAction SilentlyContinue | Format-Table -AutoSize
+        }
+
+    - name: Simulate system resources (env vars only)
+      shell: powershell
+      run: |
+        Write-Host "Setting simulation env vars (only for processes that read them):"
+        setx SIM_RAM "$env:SIMULATED_RAM" > $null
+        setx SIM_SSD "$env:SIMULATED_SSD" > $null
+        setx SIM_CORES "$env:SIMULATED_CORES" > $null
+        Write-Host "SIM_RAM, SIM_SSD, SIM_CORES set in environment."
+
+    - name: Output connection info & keep runner alive
+      shell: powershell
+      run: |
+        Write-Host "========================================"
+        Write-Host " RDP READY (if ngrok public_url shown above)"
+        Write-Host " - PC name / Host (Android RDP): 0.tcp.ngrok.io:XXXXX  (use exactly public_url minus 'tcp://')"
+        Write-Host " - Username: rdpuser"
+        Write-Host " - Password: (from secret RDP_PASSWORD or fallback shown in logs)"
+        Write-Host " SIMULATION: RAM=$env:SIMULATED_RAM, SSD=$env:SIMULATED_SSD, CORES=$env:SIMULATED_CORES"
+        Write-Host " NOTE: Hosted runner hardware limits are enforced by GitHub; this workflow only simulates env vars."
+        Write-Host "========================================"
+        # keep runner alive so you can connect while job is running
+        ping -t 127.0.0.1        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         # Ensure TermService runs
         Set-Service -Name TermService -StartupType Automatic
         Start-Service -Name TermService
