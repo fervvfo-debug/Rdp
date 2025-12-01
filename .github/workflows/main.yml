@@ -10,316 +10,113 @@ jobs:
     env:
       NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
       RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-      SIMULATED_RAM: "32GB"
-      SIMULATED_SSD: "512GB"
-      SIMULATED_CORES: "128"
 
     steps:
-    - name: Print runner info (sanity)
+    - name: Print system info
       shell: powershell
       run: |
-        Write-Host "=== RUNNER SANITY CHECK ==="
-        try {
-          $info = Get-CimInstance Win32_ComputerSystem
-          $ramGB = [math]::Round($info.TotalPhysicalMemory/1GB,2)
-          Write-Host "Host physical RAM (GB): $ramGB"
-        } catch { Write-Host "Unable to read RAM info." }
+        Write-Host "=== SYSTEM INFO ==="
+        $info = Get-CimInstance Win32_ComputerSystem
+        $ram = [math]::Round($info.TotalPhysicalMemory/1GB,2)
+        Write-Host "RAM: $ram GB"
 
-        try {
-          $procs = Get-CimInstance Win32_Processor
-          $cores = ($procs | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
-          Write-Host "Host logical cores: $cores"
-        } catch { Write-Host "Unable to read core info." }
+        $cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
+        Write-Host "Cores: $cpu"
 
-        try {
-          $c = Get-PSDrive -Name C -ErrorAction Stop
-          $sizeGB = [math]::Round(($c.Used + $c.Free)/1GB,2)
-          Write-Host "Disk size (GB): $sizeGB"
-        } catch { Write-Host "Unable to read disk info." }
-        Write-Host "=== END SANITY ==="
+        $disk = Get-PSDrive C
+        $diskGB = [math]::Round(($disk.Used + $disk.Free)/1GB,2)
+        Write-Host "Disk: $diskGB GB"
 
-    - name: Download & Install ngrok
+    - name: Install ngrok
       shell: powershell
       run: |
-        $installPath = "$env:USERPROFILE\ngrok"
-        New-Item -ItemType Directory -Path $installPath -Force | Out-Null
-        $zip = "$installPath\ngrok.zip"
-        
-        Invoke-WebRequest "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" `
-          -OutFile $zip
-        
-        Expand-Archive -Path $zip -DestinationPath $installPath -Force
+        $path = "$env:USERPROFILE\ngrok"
+        if (!(Test-Path $path)) { New-Item -ItemType Directory -Path $path | Out-Null }
+        $zip = "$path\ngrok.zip"
+
+        Write-Host "Downloading ngrok..."
+        iwr "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile $zip -UseBasicParsing
+
+        Expand-Archive $zip -DestinationPath $path -Force
         Remove-Item $zip -Force
 
         Write-Host "ngrok installed."
 
-    - name: Configure ngrok authtoken
+    - name: Configure ngrok
       shell: powershell
       run: |
         $ngrok = "$env:USERPROFILE\ngrok\ngrok.exe"
 
-        if (-not (Test-Path $ngrok)) { throw "Ngrok not found!" }
-
-        if ($env:NGROK_AUTHTOKEN -eq $null -or $env:NGROK_AUTHTOKEN -eq "") {
-          Write-Warning "No NGROK_AUTHTOKEN provided!"
-        } else {
-          & $ngrok authtoken $env:NGROK_AUTHTOKEN
-          & $ngrok version
+        if (!(Test-Path $ngrok)) {
+          throw "Ngrok missing!"
         }
 
-    - name: Enable RDP, Firewall, TermService
+        if ($env:NGROK_AUTHTOKEN) {
+          & $ngrok authtoken $env:NGROK_AUTHTOKEN
+        } else {
+          Write-Warning "NGROK_AUTHTOKEN missing!"
+        }
+
+    - name: Enable RDP
       shell: powershell
       run: |
-        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' `
-          -Name 'fDenyTSConnections' -Value 0
+        Write-Host "Enabling RDP..."
+
+        Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
 
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
 
-        Set-Service -Name TermService -StartupType Automatic
-        Start-Service -Name TermService -ErrorAction SilentlyContinue
+        sc.exe config TermService start= auto
+        Start-Service TermService -ErrorAction SilentlyContinue
 
-        Write-Host "RDP Enabled."
+        Write-Host "RDP enabled."
 
     - name: Create RDP user
       shell: powershell
       run: |
-        $username = "rdpuser"
+        $user = "rdpuser"
 
-        if ($env:RDP_PASSWORD -eq $null -or $env:RDP_PASSWORD -eq "") {
-          $password = "Rdp!ChangeMe123"
-          Write-Warning "RDP_PASSWORD secret not provided. Using fallback password!"
+        if (!$env:RDP_PASSWORD) {
+          $pw = "Rdp12345!"
+          Write-Warning "RDP_PASSWORD not set. Using fallback!"
         } else {
-          $password = $env:RDP_PASSWORD
+          $pw = $env:RDP_PASSWORD
         }
 
-        $securePw = ConvertTo-SecureString $password -AsPlainText -Force
+        $secPw = ConvertTo-SecureString $pw -AsPlainText -Force
 
-        if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-          New-LocalUser -Name $username -Password $securePw
+        if (!(Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+          New-LocalUser -Name $user -Password $secPw
         } else {
-          Set-LocalUser -Name $username -Password $securePw
+          Set-LocalUser -Name $user -Password $secPw
         }
 
-        Add-LocalGroupMember -Group administrators -Member $username
-
+        Add-LocalGroupMember -Group administrators -Member $user -ErrorAction SilentlyContinue
         Write-Host "RDP user ready."
 
-    - name: Start ngrok TCP tunnel
+    - name: Start ngrok tunnel
       shell: powershell
       run: |
         $ngrok = "$env:USERPROFILE\ngrok\ngrok.exe"
+        Start-Process $ngrok -ArgumentList "tcp 3389" -WindowStyle Hidden
 
-        Start-Process -FilePath $ngrok -ArgumentList "tcp 3389" -WindowStyle Hidden
-
-        Write-Host "Waiting for ngrok tunnel..."
-        Start-Sleep 8
+        Write-Host "Waiting for ngrok (15s)..."
+        Start-Sleep 15
 
         try {
-          $api = "http://127.0.0.1:4040/api/tunnels"
-          $tunnels = Invoke-RestMethod -Uri $api
-
-          foreach ($t in $tunnels.tunnels) {
-            Write-Host "Ngrok public URL: $($t.public_url)"
-          }
+          $api = Invoke-RestMethod "http://127.0.0.1:4040/api/tunnels"
+          $url = $api.tunnels.public_url
+          Write-Host "===================================="
+          Write-Host "   RDP ADDRESS: $url"
+          Write-Host "   USER: rdpuser"
+          Write-Host "   PASS: (your secret)"
+          Write-Host "===================================="
         } catch {
-          Write-Warning "Ngrok API not ready. Try again manually."
+          Write-Warning "Ngrok API not ready yet."
         }
-
-    - name: Simulated system resources (env only)
-      shell: powershell
-      run: |
-        setx SIM_RAM $env:SIMULATED_RAM > $null
-        setx SIM_SSD $env:SIMULATED_SSD > $null
-        setx SIM_CORES $env:SIMULATED_CORES > $null
-        Write-Host "Simulation vars set."
 
     - name: Keep alive
       shell: powershell
       run: |
-        Write-Host "RDP READY. KEEPING RUNNER ALIVE..."
-        ping -t 127.0.0.1
-    - name: Download & Install ngrok
-      shell: powershell
-      run: |
-        $installPath = "$env:USERPROFILE\ngrok"
-        New-Item -ItemType Directory -Path $installPath -Force | Out-Null
-        $zip = "$installPath\ngrok.zip"
-        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile $zip -UseBasicParsing
-        Expand-Archive -Path $zip -DestinationPath $installPath -Force
-        Remove-Item $zip -Force
-        Write-Host "ngrok installed to $installPath"
-
-    - name: Configure ngrok authtoken
-      shell: powershell
-      run: |
-        $ngrokExe = "$env:USERPROFILE\ngrok\ngrok.exe"
-        if (-not (Test-Path $ngrokExe)) { throw "ngrok binary not found at $ngrokExe" }
-        if (-not $env:NGROK_AUTHTOKEN -or $env:NGROK_AUTHTOKEN -eq "") {
-          Write-Warning "NGROK_AUTHTOKEN not set (repo secret). ngrok will run in limited mode."
-        } else {
-          & $ngrokExe authtoken $env:NGROK_AUTHTOKEN
-          & $ngrokExe version
-        }
-
-    - name: Enable Remote Desktop, Firewall & TermService
-      shell: powershell
-      run: |
-        Write-Host "Enabling RDP and firewall rules..."
-        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-        Set-Service -Name TermService -StartupType Automatic
-        Start-Service -Name TermService -ErrorAction SilentlyContinue
-        # try to set network profile to Private to avoid strict firewall
-        try { $adapter = Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | Select-Object -First 1; if ($adapter) { Set-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -NetworkCategory Private } } catch {}
-
-    - name: Create RDP user (rdpuser) with secure password
-      shell: powershell
-      run: |
-        $username = "rdpuser"
-        if (-not $env:RDP_PASSWORD -or $env:RDP_PASSWORD -eq "") {
-          Write-Warning "RDP_PASSWORD secret not set. Using fallback insecure password - change ASAP!"
-          $pw = "Rdp!ChangeMe123"
-        } else {
-          $pw = $env:RDP_PASSWORD
-        }
-        if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-          net user $username $pw /add
-          net localgroup administrators $username /add
-          Write-Host "Created $username"
-        } else {
-          Write-Host "User exists. Updating password."
-          net user $username $pw
-        }
-
-    - name: Start ngrok TCP tunnel to RDP (with simple auto-restart monitor)
-      shell: powershell
-      run: |
-        $ngrokExe = "$env:USERPROFILE\ngrok\ngrok.exe"
-        if (-not (Test-Path $ngrokExe)) { throw "ngrok not found: $ngrokExe" }
-        # small function: start ngrok and wait for public_url, restart once if fails
-        function Start-NgrokAndShow {
-          param($attempts=2)
-          for ($a=1; $a -le $attempts; $a++) {
-            Write-Host "Starting ngrok (attempt $a)..."
-            # Stop any existing ngrok
-            Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Start-Process -FilePath $ngrokExe -ArgumentList "tcp 3389" -WindowStyle Hidden
-            Start-Sleep -Seconds 6
-            try {
-              $api = "http://127.0.0.1:4040/api/tunnels"
-              $tunnels = Invoke-RestMethod -Uri $api -UseBasicParsing -ErrorAction Stop
-              if ($tunnels -and $tunnels.tunnels.Count -gt 0) {
-                foreach ($t in $tunnels.tunnels) {
-                  Write-Host "Ngrok public_url: $($t.public_url)  -> local: $($t.config.addr)"
-                }
-                return $true
-              } else {
-                Write-Warning "ngrok running but no tunnels found yet"
-              }
-            } catch {
-              Write-Warning "ngrok API not ready: $_"
-            }
-            Start-Sleep -Seconds 3
-          }
-          return $false
-        }
-
-        $ok = Start-NgrokAndShow -attempts 3
-        if (-not $ok) {
-          Write-Warning "ngrok failed to provide tunnels. Check runner connectivity or authtoken."
-          Get-Process -Name ngrok -ErrorAction SilentlyContinue | Format-Table -AutoSize
-        }
-
-    - name: Simulate system resources (env vars only)
-      shell: powershell
-      run: |
-        Write-Host "Setting simulation env vars (only for processes that read them):"
-        setx SIM_RAM "$env:SIMULATED_RAM" > $null
-        setx SIM_SSD "$env:SIMULATED_SSD" > $null
-        setx SIM_CORES "$env:SIMULATED_CORES" > $null
-        Write-Host "SIM_RAM, SIM_SSD, SIM_CORES set in environment."
-
-    - name: Output connection info & keep runner alive
-      shell: powershell
-      run: |
-        Write-Host "========================================"
-        Write-Host " RDP READY (if ngrok public_url shown above)"
-        Write-Host " - PC name / Host (Android RDP): 0.tcp.ngrok.io:XXXXX  (use exactly public_url minus 'tcp://')"
-        Write-Host " - Username: rdpuser"
-        Write-Host " - Password: (from secret RDP_PASSWORD or fallback shown in logs)"
-        Write-Host " SIMULATION: RAM=$env:SIMULATED_RAM, SSD=$env:SIMULATED_SSD, CORES=$env:SIMULATED_CORES"
-        Write-Host " NOTE: Hosted runner hardware limits are enforced by GitHub; this workflow only simulates env vars."
-        Write-Host "========================================"
-        # keep runner alive so you can connect while job is running
-        ping -t 127.0.0.1        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        # Ensure TermService runs
-        Set-Service -Name TermService -StartupType Automatic
-        Start-Service -Name TermService
-        # set network profile to Private (reduce restrictive firewall)
-        try { Set-NetConnectionProfile -InterfaceAlias (Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | Select-Object -First 1).Name -NetworkCategory Private } catch {}
-        Write-Host "RDP, Firewall, TermService enabled."
-      shell: powershell
-
-    - name: Create admin user (rdpuser)
-      run: |
-        # only create if not exists
-        $u = 'gene'
-        $pw = 'rdp12345!'
-        if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
-          net user $u $pw /add
-          net localgroup administrators $u /add
-        } else {
-          Write-Host "User $u already exists"
-        }
-      shell: powershell
-
-    - name: Start Ngrok TCP tunnel to RDP (3389) and show public address
-      run: |
-        Set-Location "$env:USERPROFILE\ngrok"
-
-        # start ngrok in background
-        Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389" -WindowStyle Hidden
-
-        # wait a bit for tunnel to come up
-        Start-Sleep -Seconds 6
-
-        # query local ngrok http api to get public URL
-        try {
-          $tunnels = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -UseBasicParsing -ErrorAction Stop
-          if ($tunnels.tunnels.Count -gt 0) {
-            foreach ($t in $tunnels.tunnels) {
-              Write-Host "Ngrok tunnel: $($t.public_url)"
-            }
-          } else {
-            Write-Host "Ngrok running but no tunnels found in API response."
-            Get-ChildItem -Path "$env:USERPROFILE\ngrok"
-          }
-        } catch {
-          Write-Host "Failed to query ngrok API: $_"
-        }
-
-        # dump running processes for debugging
-        Get-Process ngrok -ErrorAction SilentlyContinue | Format-Table -AutoSize
-      shell: powershell
-
-    - name: Simulate 128 cores env & set RAM var (virtual)
-      run: |
-        # Note: GitHub VM hardware is limited; this only sets env vars for processes that rely on them.
-        setx NUMBER_OF_LOGICAL_CORES "128"
-        setx VIRTUAL_RAM "16GB"
-        Write-Host "Set NUMBER_OF_LOGICAL_CORES=128 and VIRTUAL_RAM=16GB (env vars only)."
-      shell: powershell
-
-    - name: Output connection info reminder
-      run: |
-        Write-Host "=========================================="
-        Write-Host "Use the ngrok public_url value printed above."
-        Write-Host "When connecting from Android Microsoft RDP:"
-        Write-Host "  - PC name / Host: 0.tcp.ngrok.io:XXXXX  (use exactly as shown; remove 'tcp://')"
-        Write-Host "  - Username: gene"
-        Write-Host "  - Password: Rdp12345!"
-        Write-Host "DO NOT commit your NGROK_AUTHTOKEN to public repos."
-        Write-Host "=========================================="
-        # keep runner alive so ngrok and RDP stay running while you connect
-        ping -t 127.0.0.1
-      shell: powershell
+        Write-Host "Session alive. Press CTRL+C to stop."
+        while ($true) { Start-Sleep 60 }
