@@ -5,11 +5,11 @@ on:
 
 jobs:
   win-rdp:
-    runs-on: windows-latest     # sesuai permintaanmu
+    runs-on: windows-latest
     timeout-minutes: 360
     env:
-      NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}   # set di repo Secrets
-      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}         # optional, set secure password
+      NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
       SIMULATED_RAM: "32GB"
       SIMULATED_SSD: "512GB"
       SIMULATED_CORES: "128"
@@ -20,21 +20,124 @@ jobs:
       run: |
         Write-Host "=== RUNNER SANITY CHECK ==="
         try {
-          $ramBytes = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
-          $ramGB = [math]::Round($ramBytes/1GB,2)
+          $info = Get-CimInstance Win32_ComputerSystem
+          $ramGB = [math]::Round($info.TotalPhysicalMemory/1GB,2)
           Write-Host "Host physical RAM (GB): $ramGB"
-        } catch { Write-Host "Couldn't read physical RAM info on hosted runner." }
+        } catch { Write-Host "Unable to read RAM info." }
+
         try {
-          $cores = (Get-WmiObject -Class Win32_Processor | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
+          $procs = Get-CimInstance Win32_Processor
+          $cores = ($procs | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
           Write-Host "Host logical cores: $cores"
-        } catch { Write-Host "Couldn't read core info." }
+        } catch { Write-Host "Unable to read core info." }
+
         try {
           $c = Get-PSDrive -Name C -ErrorAction Stop
           $sizeGB = [math]::Round(($c.Used + $c.Free)/1GB,2)
-          Write-Host "Host C: size (GB): $sizeGB"
-        } catch { Write-Host "Couldn't read disk info." }
+          Write-Host "Disk size (GB): $sizeGB"
+        } catch { Write-Host "Unable to read disk info." }
         Write-Host "=== END SANITY ==="
 
+    - name: Download & Install ngrok
+      shell: powershell
+      run: |
+        $installPath = "$env:USERPROFILE\ngrok"
+        New-Item -ItemType Directory -Path $installPath -Force | Out-Null
+        $zip = "$installPath\ngrok.zip"
+        
+        Invoke-WebRequest "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" `
+          -OutFile $zip
+        
+        Expand-Archive -Path $zip -DestinationPath $installPath -Force
+        Remove-Item $zip -Force
+
+        Write-Host "ngrok installed."
+
+    - name: Configure ngrok authtoken
+      shell: powershell
+      run: |
+        $ngrok = "$env:USERPROFILE\ngrok\ngrok.exe"
+
+        if (-not (Test-Path $ngrok)) { throw "Ngrok not found!" }
+
+        if ($env:NGROK_AUTHTOKEN -eq $null -or $env:NGROK_AUTHTOKEN -eq "") {
+          Write-Warning "No NGROK_AUTHTOKEN provided!"
+        } else {
+          & $ngrok authtoken $env:NGROK_AUTHTOKEN
+          & $ngrok version
+        }
+
+    - name: Enable RDP, Firewall, TermService
+      shell: powershell
+      run: |
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' `
+          -Name 'fDenyTSConnections' -Value 0
+
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+
+        Set-Service -Name TermService -StartupType Automatic
+        Start-Service -Name TermService -ErrorAction SilentlyContinue
+
+        Write-Host "RDP Enabled."
+
+    - name: Create RDP user
+      shell: powershell
+      run: |
+        $username = "rdpuser"
+
+        if ($env:RDP_PASSWORD -eq $null -or $env:RDP_PASSWORD -eq "") {
+          $password = "Rdp!ChangeMe123"
+          Write-Warning "RDP_PASSWORD secret not provided. Using fallback password!"
+        } else {
+          $password = $env:RDP_PASSWORD
+        }
+
+        $securePw = ConvertTo-SecureString $password -AsPlainText -Force
+
+        if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+          New-LocalUser -Name $username -Password $securePw
+        } else {
+          Set-LocalUser -Name $username -Password $securePw
+        }
+
+        Add-LocalGroupMember -Group administrators -Member $username
+
+        Write-Host "RDP user ready."
+
+    - name: Start ngrok TCP tunnel
+      shell: powershell
+      run: |
+        $ngrok = "$env:USERPROFILE\ngrok\ngrok.exe"
+
+        Start-Process -FilePath $ngrok -ArgumentList "tcp 3389" -WindowStyle Hidden
+
+        Write-Host "Waiting for ngrok tunnel..."
+        Start-Sleep 8
+
+        try {
+          $api = "http://127.0.0.1:4040/api/tunnels"
+          $tunnels = Invoke-RestMethod -Uri $api
+
+          foreach ($t in $tunnels.tunnels) {
+            Write-Host "Ngrok public URL: $($t.public_url)"
+          }
+        } catch {
+          Write-Warning "Ngrok API not ready. Try again manually."
+        }
+
+    - name: Simulated system resources (env only)
+      shell: powershell
+      run: |
+        setx SIM_RAM $env:SIMULATED_RAM > $null
+        setx SIM_SSD $env:SIMULATED_SSD > $null
+        setx SIM_CORES $env:SIMULATED_CORES > $null
+        Write-Host "Simulation vars set."
+
+    - name: Keep alive
+      shell: powershell
+      run: |
+        Write-Host "RDP READY. KEEPING RUNNER ALIVE..."
+        ping -t 127.0.0.1
     - name: Download & Install ngrok
       shell: powershell
       run: |
