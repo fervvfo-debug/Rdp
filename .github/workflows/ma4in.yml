@@ -1,40 +1,44 @@
-name: Windows-AnyDesk-Fixed
+name: Windows-RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  rdp:
     runs-on: windows-latest
     timeout-minutes: 360
 
     steps:
-    - name: Download and Install AnyDesk
+    - name: Download Ngrok
+      shell: powershell
       run: |
-        Write-Host "Downloading AnyDesk..."
-        Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "AnyDesk.exe"
-        
-        Write-Host "Installing AnyDesk..."
-        Start-Process .\AnyDesk.exe -ArgumentList "--install C:\AnyDesk --silent" -Wait
-        Start-Sleep -Seconds 20
+        Invoke-WebRequest https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
+        Expand-Archive ngrok.zip
 
-    - name: Configure AnyDesk
+    - name: Setup RDP
+      shell: powershell
       run: |
-        Write-Host "Setting password..."
-        
-        # Try different paths
-        $paths = @(
-          "C:\AnyDesk\AnyDesk.exe",
-          "C:\Program Files (x86)\AnyDesk\AnyDesk.exe",
-          "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
-        )
-        
-        $adPath = $null
-        foreach($p in $paths) {
-          if(Test-Path $p) {
-            $adPath = $p
-            Write-Host "Found AnyDesk at: $p"
-            break
+        .\ngrok\ngrok.exe authtoken $env:NGROK_TOKEN
+        Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name fDenyTSConnections -Value 0
+        Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name UserAuthentication -Value 0
+        Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name SecurityLayer -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        net user runneradmin Pass123!
+      env:
+        NGROK_TOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+
+    - name: Start RDP
+      shell: powershell
+      run: |
+        Start-Process .\ngrok\ngrok.exe -ArgumentList "tcp 3389"
+        Start-Sleep 20
+        $url = (Invoke-RestMethod http://localhost:4040/api/tunnels).tunnels[0].public_url -replace "tcp://",""
+        Write-Host "================================================"
+        Write-Host "RDP: $url"
+        Write-Host "USER: runneradmin"
+        Write-Host "PASS: Pass123!"
+        Write-Host "================================================"
+        while($true) { Start-Sleep 600 }            break
           }
         }
         
