@@ -1,4 +1,4 @@
-name: Windows-AnyDesk
+name: Windows-AnyDesk-Fixed
 
 on:
   workflow_dispatch:
@@ -9,32 +9,84 @@ jobs:
     timeout-minutes: 360
 
     steps:
-    - name: Download AnyDesk
+    - name: Download and Install AnyDesk
       run: |
+        Write-Host "Downloading AnyDesk..."
         Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk.exe" -OutFile "AnyDesk.exe"
+        
+        Write-Host "Installing AnyDesk..."
+        Start-Process .\AnyDesk.exe -ArgumentList "--install C:\AnyDesk --silent" -Wait
+        Start-Sleep -Seconds 20
 
-    - name: Install and Setup AnyDesk
+    - name: Configure AnyDesk
       run: |
-        Start-Process .\AnyDesk.exe -ArgumentList "--install C:\AnyDesk --start-with-win --silent" -Wait
-        Start-Sleep -Seconds 15
+        Write-Host "Setting password..."
         
-        # Get AnyDesk ID
-        $adPath = "C:\Program Files (x86)\AnyDesk\AnyDesk.exe"
-        if(!(Test-Path $adPath)) { $adPath = "C:\AnyDesk\AnyDesk.exe" }
+        # Try different paths
+        $paths = @(
+          "C:\AnyDesk\AnyDesk.exe",
+          "C:\Program Files (x86)\AnyDesk\AnyDesk.exe",
+          "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
+        )
         
-        # Set password via command line
-        & $adPath --set-password MyPass123!
+        $adPath = $null
+        foreach($p in $paths) {
+          if(Test-Path $p) {
+            $adPath = $p
+            Write-Host "Found AnyDesk at: $p"
+            break
+          }
+        }
+        
+        if($adPath) {
+          & $adPath --set-password "MyPass123!"
+          Start-Sleep 5
+        } else {
+          Write-Host "ERROR: AnyDesk not found in any location!"
+          Get-ChildItem C:\ -Recurse -Filter "AnyDesk.exe" -ErrorAction SilentlyContinue | Select-Object FullName
+        }
 
     - name: Get AnyDesk ID
       run: |
-        Start-Sleep -Seconds 10
-        $adPath = "C:\Program Files (x86)\AnyDesk\AnyDesk.exe"
-        if(!(Test-Path $adPath)) { $adPath = "C:\AnyDesk\AnyDesk.exe" }
+        Write-Host "Getting AnyDesk ID..."
+        Start-Sleep 10
         
-        if(Test-Path $adPath) {
+        $paths = @(
+          "C:\AnyDesk\AnyDesk.exe",
+          "C:\Program Files (x86)\AnyDesk\AnyDesk.exe",
+          "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
+        )
+        
+        $adPath = $null
+        foreach($p in $paths) {
+          if(Test-Path $p) {
+            $adPath = $p
+            break
+          }
+        }
+        
+        if($adPath) {
           $id = & $adPath --get-id
           Write-Host ""
-          Write-Host "================================================"
+          Write-Host "=============================================="
+          Write-Host "ANYDESK ID: $id" -ForegroundColor Green
+          Write-Host "PASSWORD: MyPass123!" -ForegroundColor Green  
+          Write-Host "=============================================="
+          Write-Host ""
+          Write-Host "1. Download AnyDesk on your phone"
+          Write-Host "2. Enter ID: $id"
+          Write-Host "3. Use password: MyPass123!"
+        } else {
+          Write-Host "ERROR: Could not find AnyDesk!"
+        }
+
+    - name: Keep Alive
+      run: |
+        Write-Host "Session running. Check logs above for AnyDesk ID."
+        while($true) { 
+          Start-Sleep 600
+          Write-Host "Still alive..."
+        }          Write-Host "================================================"
           Write-Host "ANYDESK ID: $id" -ForegroundColor Green
           Write-Host "PASSWORD: MyPass123!" -ForegroundColor Green
           Write-Host "================================================"
