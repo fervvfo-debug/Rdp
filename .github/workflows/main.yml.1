@@ -1,0 +1,97 @@
+name: Windows-RDP-Fixed
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+    - name: Setup RDP Service
+      run: |
+        # Enable RDP
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
+        
+        # Start service
+        Set-Service -Name TermService -StartupType Automatic
+        Start-Service -Name TermService
+        
+        Write-Host "RDP Service enabled and started"
+
+    - name: Create RDP User
+      run: |
+        $password = if ($env:RDP_PASSWORD) { $env:RDP_PASSWORD } else { "P@ssw0rd123!" }
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        # Remove user if exists
+        if (Get-LocalUser -Name "rdpuser" -ErrorAction SilentlyContinue) {
+          Remove-LocalUser -Name "rdpuser"
+        }
+        
+        # Create new user
+        New-LocalUser -Name "rdpuser" -Password $securePassword -PasswordNeverExpires -AccountNeverExpires
+        Add-LocalGroupMember -Group "Administrators" -Member "rdpuser"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "rdpuser"
+        
+        Write-Host "User 'rdpuser' created successfully"
+      env:
+        RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+
+    - name: Download ngrok
+      run: |
+        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+        Expand-Archive -Path "ngrok.zip" -DestinationPath "ngrok"
+        Remove-Item "ngrok.zip"
+
+    - name: Configure ngrok
+      run: |
+        ./ngrok/ngrok.exe config add-authtoken $env:NGROK_AUTHTOKEN
+      env:
+        NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+
+    - name: Start ngrok Tunnel
+      run: |
+        Start-Process -FilePath "./ngrok/ngrok.exe" -ArgumentList "tcp 3389 --log=stdout" -WindowStyle Hidden
+        Start-Sleep -Seconds 15
+
+    - name: Get Connection Info
+      run: |
+        try {
+          $response = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels"
+          $publicUrl = $response.tunnels[0].public_url
+          $cleanUrl = $publicUrl -replace "tcp://", ""
+          
+          Write-Host ""
+          Write-Host "=============================================" -ForegroundColor Green
+          Write-Host "  RDP CONNECTION READY!" -ForegroundColor Yellow
+          Write-Host "=============================================" -ForegroundColor Green
+          Write-Host "  Host: $cleanUrl" -ForegroundColor Cyan
+          Write-Host "  Username: rdpuser" -ForegroundColor Cyan
+          Write-Host "  Password: (your RDP_PASSWORD secret)" -ForegroundColor Cyan
+          Write-Host "=============================================" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "Connection String: $cleanUrl" -ForegroundColor White
+          Write-Host ""
+        } catch {
+          Write-Host "Ngrok API not responding yet. Wait 30 more seconds." -ForegroundColor Yellow
+          Start-Sleep -Seconds 30
+          
+          $response = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels"
+          $publicUrl = $response.tunnels[0].public_url
+          $cleanUrl = $publicUrl -replace "tcp://", ""
+          Write-Host "Connection: $cleanUrl" -ForegroundColor Cyan
+        }
+
+    - name: Keep Session Alive
+      run: |
+        Write-Host "RDP server is running. Session will stay alive for 6 hours." -ForegroundColor Green
+        Write-Host "Press Ctrl+C in Actions to stop." -ForegroundColor Yellow
+        
+        while ($true) {
+          Start-Sleep -Seconds 300
+          Write-Host "Still running... $(Get-Date -Format 'HH:mm:ss')"
+        }
